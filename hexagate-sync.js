@@ -22,6 +22,10 @@ async function main() {
 
 	const http = createClient(apiKey);
 
+	log("Fetching Hexagate chain registry…");
+	const supportedChains = await fetchSupportedChains(http);
+	log(`Found ${supportedChains.size} monitorable chains`);
+
 	log("Fetching kind=1 tag inventory…");
 	const allTags = await fetchAllAddressTags(http);
 	const byName = new Map(allTags.map((t) => [t.name, t]));
@@ -57,10 +61,23 @@ async function main() {
 
 	const plan = [];
 	for (const chainId of chainDirs) {
-		const chainTag = discoverChainTag(allTags, chainId);
 		const desired = readDesiredVaults(chainId);
 		const current = govByChain.get(chainId) ?? new Set();
 
+		if (!supportedChains.has(chainId)) {
+			plan.push({
+				chainId,
+				skipped: "chain not supported by Hexagate (not monitorable)",
+				desired,
+				current,
+				toAdd: new Set(),
+				toRemove: current,
+				chainTag: null,
+			});
+			continue;
+		}
+
+		const chainTag = discoverChainTag(allTags, chainId);
 		if (!chainTag) {
 			plan.push({
 				chainId,
@@ -90,7 +107,6 @@ async function main() {
 
 	if (args.mode === "apply") {
 		for (const entry of plan) {
-			if (entry.skipped) continue;
 			if (entry.toAdd.size > 0) {
 				await applyAdds(http, entry, govVault);
 			}
@@ -182,6 +198,21 @@ function createClient(apiKey) {
 		post: (path, body, query) => request("POST", path, { body, query }),
 		delete: (path, query) => request("DELETE", path, { query }),
 	};
+}
+
+async function fetchSupportedChains(http) {
+	const res = await http.get("/api/v1/chains/");
+	const out = new Set();
+	for (const [k, info] of Object.entries(res ?? {})) {
+		const cid = Number(k);
+		if (!Number.isFinite(cid) || cid <= 0) continue;
+		if (info?.chain_type !== "evm") continue;
+		if (!info?.concord_support) continue;
+		if (!info?.included_in_plan) continue;
+		if (info?.is_testnet) continue;
+		out.add(cid);
+	}
+	return out;
 }
 
 async function fetchAllAddressTags(http) {
@@ -308,25 +339,21 @@ function renderSummary(plan, mode) {
 	let totalRemove = 0;
 	for (const e of plan) {
 		const status = e.skipped ? `skipped: ${e.skipped}` : "ok";
-		const add = e.skipped ? "—" : String(e.toAdd.size);
-		const rem = e.skipped ? "—" : String(e.toRemove.size);
 		lines.push(
-			`| ${e.chainId} | ${e.desired.size} | ${e.current.size} | ${add} | ${rem} | ${status} |`,
+			`| ${e.chainId} | ${e.desired.size} | ${e.current.size} | ${e.toAdd.size} | ${e.toRemove.size} | ${status} |`,
 		);
-		if (!e.skipped) {
-			totalAdd += e.toAdd.size;
-			totalRemove += e.toRemove.size;
-		}
+		totalAdd += e.toAdd.size;
+		totalRemove += e.toRemove.size;
 	}
 	lines.push(`| **total** |  |  | **${totalAdd}** | **${totalRemove}** |  |`);
 	lines.push("");
 
 	for (const e of plan) {
-		if (e.skipped) continue;
 		if (e.toAdd.size === 0 && e.toRemove.size === 0) continue;
-		lines.push(
-			`<details><summary>chain ${e.chainId}: +${e.toAdd.size} / -${e.toRemove.size}</summary>`,
-		);
+		const heading = e.skipped
+			? `chain ${e.chainId}: cleanup -${e.toRemove.size} (${e.skipped})`
+			: `chain ${e.chainId}: +${e.toAdd.size} / -${e.toRemove.size}`;
+		lines.push(`<details><summary>${heading}</summary>`);
 		lines.push("");
 		if (e.toAdd.size > 0) {
 			lines.push("**Add:**");
@@ -346,10 +373,14 @@ function renderSummary(plan, mode) {
 
 	const skipped = plan.filter((e) => e.skipped);
 	if (skipped.length > 0) {
-		lines.push("**Skipped chains:**");
+		lines.push("**Skipped chains (no sync):**");
 		lines.push("");
 		for (const e of skipped) {
-			lines.push(`- \`${e.chainId}\` — ${e.skipped}`);
+			const cleanup =
+				e.toRemove.size > 0
+					? ` — cleaning up ${e.toRemove.size} stale entry(ies)`
+					: "";
+			lines.push(`- \`${e.chainId}\` — ${e.skipped}${cleanup}`);
 		}
 		lines.push("");
 	}

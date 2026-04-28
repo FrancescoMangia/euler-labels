@@ -8,6 +8,21 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: "dry-run"
+        type: choice
+        options:
+          - dry-run
+          - apply
+      only:
+        description: "Optional comma-separated chainId list (leave blank for all chains)"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: hexagate-sync-${{ github.ref }}
@@ -34,11 +49,23 @@ jobs:
       - name: Verify data
         run: node verify.js
 
-      - name: Run Hexagate sync
+      - name: Resolve sync mode
+        id: mode
         run: |
-          node hexagate-sync.js \
-            ${{ github.event_name == 'pull_request' && '--dry-run' || '--apply' }} \
-            > sync-output.md
+          case "${{ github.event_name }}" in
+            pull_request)     mode="--dry-run" ;;
+            push)             mode="--apply" ;;
+            workflow_dispatch) mode="--${{ github.event.inputs.mode }}" ;;
+            *)                mode="--dry-run" ;;
+          esac
+          only=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.only }}" ]; then
+            only="--only=${{ github.event.inputs.only }}"
+          fi
+          echo "args=${mode} ${only}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Hexagate sync
+        run: node hexagate-sync.js ${{ steps.mode.outputs.args }} > sync-output.md
         env:
           HEXAGATE_API_KEY: ${{ secrets.HEXAGATE_API_KEY }}
 
@@ -48,3 +75,17 @@ jobs:
         with:
           header: hexagate-sync
           path: sync-output.md
+
+      - name: Upload sync summary
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-output
+          path: sync-output.md
+
+      - name: Append sync summary to job summary
+        if: always()
+        run: |
+          if [ -f sync-output.md ]; then
+            cat sync-output.md >> "$GITHUB_STEP_SUMMARY"
+          fi
