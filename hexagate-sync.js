@@ -9,6 +9,9 @@ const TAG_PAGE_SIZE = 300;
 const ENTITY_RESOLVE_PAGE_SIZE = 200;
 const ADD_BATCH_SIZE = 50;
 const DELETE_BATCH_SIZE = 100;
+const REQUEST_TIMEOUT_MS = 30_000;
+const REQUEST_MAX_RETRIES = 2;
+const REQUEST_RETRY_BASE_MS = 1_000;
 
 main().catch((err) => {
 	process.stderr.write(`ERROR: ${err.stack || err.message || err}\n`);
@@ -183,14 +186,43 @@ function createClient(apiKey) {
 			init.headers["Content-Type"] = "application/json";
 			init.body = JSON.stringify(body);
 		}
-		const res = await fetch(url, init);
-		if (!res.ok) {
-			const text = await res.text();
-			throw Error(`${method} ${path} → HTTP ${res.status}: ${text}`);
+
+		let lastErr = null;
+		for (let attempt = 0; attempt <= REQUEST_MAX_RETRIES; attempt++) {
+			try {
+				const res = await fetch(url, {
+					...init,
+					signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+				});
+				if (res.status >= 500 && attempt < REQUEST_MAX_RETRIES) {
+					const text = await res.text();
+					lastErr = Error(`${method} ${path} → HTTP ${res.status}: ${text}`);
+					log(
+						`retry ${attempt + 1}/${REQUEST_MAX_RETRIES}: ${method} ${path} (HTTP ${res.status})`,
+					);
+					await sleep(REQUEST_RETRY_BASE_MS * 2 ** attempt);
+					continue;
+				}
+				if (!res.ok) {
+					const text = await res.text();
+					throw Error(`${method} ${path} → HTTP ${res.status}: ${text}`);
+				}
+				if (res.status === 204) return null;
+				const ct = res.headers.get("content-type") || "";
+				return ct.includes("application/json") ? res.json() : res.text();
+			} catch (err) {
+				if (attempt < REQUEST_MAX_RETRIES && isTransient(err)) {
+					lastErr = err;
+					log(
+						`retry ${attempt + 1}/${REQUEST_MAX_RETRIES}: ${method} ${path} (${err.message || err})`,
+					);
+					await sleep(REQUEST_RETRY_BASE_MS * 2 ** attempt);
+					continue;
+				}
+				throw err;
+			}
 		}
-		if (res.status === 204) return null;
-		const ct = res.headers.get("content-type") || "";
-		return ct.includes("application/json") ? res.json() : res.text();
+		throw lastErr;
 	}
 
 	return {
@@ -239,15 +271,25 @@ function normalizeEntitiesByChain(ebc) {
 }
 
 function discoverChainTag(allTags, chainId) {
-	let best = null;
+	const candidates = [];
 	for (const t of allTags) {
 		const ebc = t.entities_by_chain ?? {};
 		const keys = Object.keys(ebc).map(Number);
 		if (keys.length !== 1 || keys[0] !== chainId) continue;
-		const n = ebc[String(chainId)].length;
-		if (!best || n > best.n) best = { tag: t, n };
+		candidates.push({ tag: t, n: ebc[String(chainId)].length });
 	}
-	return best?.tag ?? null;
+	if (candidates.length === 0) return null;
+	candidates.sort((a, b) => b.n - a.n);
+	if (candidates.length > 1) {
+		const others = candidates
+			.slice(1)
+			.map((c) => `${c.tag.name}=${c.n}`)
+			.join(", ");
+		log(
+			`chain ${chainId}: ${candidates.length} candidate per-chain tags, picking '${candidates[0].tag.name}' (${candidates[0].n}) over [${others}]`,
+		);
+	}
+	return candidates[0].tag;
 }
 
 function readDesiredVaults(chainId) {
@@ -390,4 +432,21 @@ function renderSummary(plan, mode) {
 
 function log(msg) {
 	process.stderr.write(`${msg}\n`);
+}
+
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransient(err) {
+	if (!err) return false;
+	if (err.name === "TimeoutError" || err.name === "AbortError") return true;
+	const code = err.cause?.code ?? err.code;
+	return (
+		code === "ECONNRESET" ||
+		code === "ETIMEDOUT" ||
+		code === "ECONNREFUSED" ||
+		code === "EAI_AGAIN" ||
+		code === "ENOTFOUND"
+	);
 }

@@ -42,9 +42,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Verify data
         run: node verify.js
@@ -69,8 +70,27 @@ jobs:
         env:
           HEXAGATE_API_KEY: ${{ secrets.HEXAGATE_API_KEY }}
 
+      - name: Build failure comment
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "# Hexagate sync — failed"
+            echo ""
+            echo "Workflow run failed. See [the run logs]($RUN_URL) for details."
+            if [ -s sync-output.md ]; then
+              echo ""
+              echo "<details><summary>Partial output</summary>"
+              echo ""
+              cat sync-output.md
+              echo ""
+              echo "</details>"
+            fi
+          } > sync-output.md
+
       - name: Comment PR with diff
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: hexagate-sync
