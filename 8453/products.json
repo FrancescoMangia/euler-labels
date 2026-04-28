@@ -1,9 +1,9 @@
 {
-	"euler-base": {
-		"name": "Euler Base",
-		"description": "A market tailored to borrowing stable assets against blue chip crypto assets. Governed by Euler DAO.",
-		"entity": ["euler-dao", "gauntlet"],
-		"url": "",
+	"alphagrowth-base-market": {
+		"name": "AlphaGrowth Base",
+		"description": "A market tailored to borrowing stable assets against blue chip crypto assets. Governed by AlphaGrowth.",
+		"entity": ["alphagrowth"],
+		"url": "https://alphagrowth.io/",
 		"vaults": [
 			"0x859160DB5841E5cfB8D3f144C6b3381A85A4b410",
 			"0x7b181d6509DEabfbd1A23aF1E65fD46E89572609",
