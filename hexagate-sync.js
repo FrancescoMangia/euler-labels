@@ -314,26 +314,60 @@ function setDiff(a, b) {
 async function applyAdds(http, entry, govVault) {
 	const addrs = [...entry.toAdd];
 	log(`chain ${entry.chainId}: adding ${addrs.length} entities…`);
+	const govTag = {
+		id: govVault.id,
+		name: govVault.name,
+		kind: TAG_KIND_ADDRESS,
+	};
+	const chainTag = {
+		id: entry.chainTag.id,
+		name: entry.chainTag.name,
+		kind: TAG_KIND_ADDRESS,
+	};
+	const existing = await fetchEntities(http, entry.chainId, addrs);
 	for (let i = 0; i < addrs.length; i += ADD_BATCH_SIZE) {
 		const slice = addrs.slice(i, i + ADD_BATCH_SIZE);
-		const body = slice.map((address) => ({
-			monitor_tags: [
-				{ id: govVault.id, name: govVault.name, kind: TAG_KIND_ADDRESS },
-				{
-					id: entry.chainTag.id,
-					name: entry.chainTag.name,
-					kind: TAG_KIND_ADDRESS,
-				},
-			],
-			monitor_entity: {
-				entity_type: ENTITY_TYPE_CONTRACT,
-				params: {
-					type: ENTITY_PARAM_TYPE,
-					address,
-					chain_id: entry.chainId,
-				},
-			},
-		}));
+		const body = [];
+		for (const address of slice) {
+			const ex = existing.get(address);
+			if (ex) {
+				const existingTags = (ex.monitor_tags ?? []).map((t) => ({
+					id: t.id,
+					name: t.name,
+					kind: t.kind,
+				}));
+				const ids = new Set(existingTags.map((t) => t.id));
+				const merged = [...existingTags];
+				if (!ids.has(govTag.id)) merged.push(govTag);
+				if (!ids.has(chainTag.id)) merged.push(chainTag);
+				if (merged.length === existingTags.length) continue;
+				body.push({
+					id: ex.id,
+					monitor_tags: merged,
+					monitor_entity: {
+						entity_type: ENTITY_TYPE_CONTRACT,
+						params: {
+							type: ENTITY_PARAM_TYPE,
+							address,
+							chain_id: entry.chainId,
+						},
+					},
+				});
+			} else {
+				body.push({
+					monitor_tags: [govTag, chainTag],
+					monitor_entity: {
+						entity_type: ENTITY_TYPE_CONTRACT,
+						params: {
+							type: ENTITY_PARAM_TYPE,
+							address,
+							chain_id: entry.chainId,
+						},
+					},
+				});
+			}
+		}
+		if (body.length === 0) continue;
 		await http.post("/api/v1/monitoring/entities_metadata/batch", body);
 	}
 }
@@ -341,7 +375,8 @@ async function applyAdds(http, entry, govVault) {
 async function applyRemoves(http, entry) {
 	const addrs = [...entry.toRemove];
 	log(`chain ${entry.chainId}: removing ${addrs.length} entities…`);
-	const ids = await resolveEntityIds(http, entry.chainId, addrs);
+	const existing = await fetchEntities(http, entry.chainId, addrs);
+	const ids = [...existing.values()].map((e) => e.id);
 	for (let i = 0; i < ids.length; i += DELETE_BATCH_SIZE) {
 		const slice = ids.slice(i, i + DELETE_BATCH_SIZE);
 		await http.delete("/api/v1/monitoring/entities_metadata/batch", {
@@ -350,8 +385,8 @@ async function applyRemoves(http, entry) {
 	}
 }
 
-async function resolveEntityIds(http, chainId, addresses) {
-	const ids = [];
+async function fetchEntities(http, chainId, addresses) {
+	const out = new Map();
 	for (let i = 0; i < addresses.length; i += ENTITY_RESOLVE_PAGE_SIZE) {
 		const slice = addresses.slice(i, i + ENTITY_RESOLVE_PAGE_SIZE);
 		let page = 1;
@@ -363,12 +398,15 @@ async function resolveEntityIds(http, chainId, addresses) {
 				addresses: slice,
 			});
 			const got = res.items ?? [];
-			for (const it of got) ids.push(it.id);
+			for (const it of got) {
+				const addr = it.monitor_entity?.params?.address?.toLowerCase();
+				if (addr) out.set(addr, it);
+			}
 			if (got.length < ENTITY_RESOLVE_PAGE_SIZE) break;
 			page += 1;
 		}
 	}
-	return ids;
+	return out;
 }
 
 function renderSummary(plan, mode) {
